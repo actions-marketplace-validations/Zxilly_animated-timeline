@@ -1,52 +1,38 @@
-/* eslint-disable @typescript-eslint/ban-ts-comment */
-
-import { getCalendar } from '../github/calendar'
-import Matter, {
-  Bodies,
-  Bounds,
-  Common,
-  Composite,
-  Engine,
-  Render,
-  Vector,
-  World
-} from 'matter-js'
-import GIFEncoder from 'gif-encoder-2'
-import { createCanvas } from 'canvas'
-import { parse } from 'opentype.js'
-import * as fs from 'fs'
-// @ts-ignore
-import fromVertices from '../utils/bodies'
-import polyDecomp from 'poly-decomp'
-import sharp from 'sharp'
-import * as core from '@actions/core'
-import * as path from 'path'
-// @ts-ignore
-import fontBin from '../../font/NotoSerifSC-Regular.otf'
-import { execFileSync } from 'child_process'
-
-const WIDTH = 1200
-const HEIGHT = 500
-
-const PIC_TIME = 6
-
-const xMargin = 4
-const yMargin = 4
-
-const boxSize = 15
-
-const totalFrames = 60 * PIC_TIME
+import {Composite, Engine, Render} from 'matter-js'
+import {createCanvas} from '@napi-rs/canvas'
+import core from '@actions/core'
+import fs from 'fs'
+import path from 'path'
+import {getCalendar} from '../github/calendar'
+import {castCanvas} from '../utils/cast'
+import {
+  backgroundColor,
+  debug,
+  FRAME_RATE,
+  HEIGHT,
+  maxTotalFrames,
+  WIDTH
+} from './const'
+import {drawCalendar} from './calendar'
+import {isWorldStopped, maxWorldSpeed} from './utils'
+import {drawText, loadFont, useFont} from './text'
+import {setBounds} from './bounds'
+import {EncoderType, loadEncoder} from './encoder'
+import {ContributionShape} from './type/shape'
 
 interface renderOptions {
   token: string
+  login: string
   name?: string
   output: string
-  type: 'webp' | 'gif'
+  font: string
+  type: EncoderType
+  shape: ContributionShape
 }
 
 export async function renderAnimatedGif(options: renderOptions): Promise<void> {
   core.info('Fetching calendar data...')
-  const [githubName, weeks] = await getCalendar(options.token)
+  const [githubName, weeks] = await getCalendar(options.login, options.token)
   core.info('Calendar data fetched.')
 
   let name = githubName
@@ -54,241 +40,80 @@ export async function renderAnimatedGif(options: renderOptions): Promise<void> {
     name = options.name
   }
 
-  const xOffset =
-    WIDTH / 2 - (weeks.length / 2) * boxSize - (weeks.length / 2 - 1) * xMargin
-  const yOffset = -160
-
-  const font = parse(fontBin.buffer)
-
   const img = createCanvas(WIDTH, HEIGHT)
-
   const ctx = img.getContext('2d')
-
   const engine = Engine.create()
 
-  const ground = Bodies.rectangle(
-    WIDTH / 2,
-    HEIGHT + boxSize,
-    WIDTH + boxSize,
-    boxSize * 2,
-    {
-      isStatic: true,
-      render: {
-        fillStyle: 'white'
-      }
-    }
-  )
-  const left = Bodies.rectangle(-boxSize, HEIGHT / 2, boxSize * 2, HEIGHT, {
-    isStatic: true,
-    render: {
-      fillStyle: 'white'
-    }
-  })
-  const right = Bodies.rectangle(
-    WIDTH + boxSize,
-    HEIGHT / 2,
-    boxSize * 2,
-    HEIGHT,
-    {
-      isStatic: true,
-      render: {
-        fillStyle: 'white'
-      },
-    }
-  )
-  World.add(engine.world, [ground, left, right])
+  await loadFont(options.font)
 
-  Common.setDecomp(polyDecomp)
+  setBounds(engine.world)
+  drawText(engine.world, name)
+  drawCalendar(engine.world, weeks, options.shape)
 
-  const text: Vector[][] = []
+  const encoder = loadEncoder(options.type)
 
-  const paths = font.getPaths(name, WIDTH / 2, HEIGHT / 2, 144)
-
-  for (const pa of paths) {
-    const cmds = pa.commands
-    let points: Vector[] = []
-    for (const cmd of cmds) {
-      switch (cmd.type) {
-        case 'M':
-        case 'L':
-          points.push(Vector.create(cmd.x, cmd.y))
-          break
-        case 'Q':
-          points.push(Vector.create((cmd.x1 + cmd.x) / 2, (cmd.y1 + cmd.y) / 2))
-          break
-        case 'C':
-          points.push(
-            Vector.create(
-              (cmd.x1 + cmd.x2 + cmd.x) / 3,
-              (cmd.y1 + cmd.y2 + cmd.y) / 3
-            )
-          )
-          break
-        case 'Z':
-          if (points.length > 0) {
-            text.push(points)
-            points = []
-          }
-      }
-    }
-  }
-
-  const textBodies = fromVertices(WIDTH / 2, HEIGHT / 2, text, {
-    isStatic: true,
-    render: {
-      fillStyle: 'white'
-    }
-  })
-
-  const textComp = Composite.create({
-    bodies: textBodies
-  })
-
-  // @ts-ignore
-  const textBound: Bounds = Composite.bounds(textComp)
-
-  World.add(engine.world, textComp)
-
-  const squares: Matter.Body[] = []
-
-  for (let i = 0; i < weeks.length; i++) {
-    for (let j = 0; j < weeks[i].contributionDays.length; j++) {
-      const day = weeks[i].contributionDays[j]
-      if (day.contributionCount === 0) continue
-
-      let density = 0
-      switch (day.contributionLevel) {
-        case 'FIRST_QUARTILE':
-          density = 4
-          break
-        case 'SECOND_QUARTILE':
-          density = 8
-          break
-        case 'THIRD_QUARTILE':
-          density = 12
-          break
-        case 'FOURTH_QUARTILE':
-          density = 16
-          break
-      }
-
-      const x = xOffset + i * boxSize + (i - 1) * xMargin
-      const y = yOffset + j * boxSize + (j - 1) * yMargin
-      const square = Bodies.rectangle(x, y, boxSize, boxSize, {
-        render: {
-          fillStyle: day.color
-        },
-        density
-      })
-
-      squares.push(square)
-    }
-  }
-
-  World.add(engine.world, squares)
-
-  const gif = new GIFEncoder(WIDTH, HEIGHT, 'neuquant', false, totalFrames)
-
-  gif.setFrameRate(60)
-  gif.start()
+  await encoder.init()
 
   const render = Render.create({
-    // @ts-ignore
-    canvas: img,
+    canvas: img as unknown as HTMLCanvasElement,
     engine,
     options: {
       width: WIDTH,
       height: HEIGHT,
-      wireframes: false,
-      wireframeBackground: undefined,
-      background: undefined
+      wireframes: debug,
+      background: undefined,
+      showDebug: debug
     }
   })
 
-  const fontPathBound = font
-    .getPath(name, WIDTH / 2, HEIGHT / 2, 144)
-    .getBoundingBox()
+  core.info(`Rendering max ${maxTotalFrames} frames...`)
 
-  const shapeCenterX = (textBound.max.x + textBound.min.x) / 2
-  const shapeCenterY = (textBound.max.y + textBound.min.y) / 2
-
-  const fontCenterX = (fontPathBound.x2 + fontPathBound.x1) / 2
-  const fontCenterY = (fontPathBound.y2 + fontPathBound.y1) / 2
-
-  core.info(`Rendering ${totalFrames} frames...`)
-
-  for (let i = 0; i < totalFrames; i++) {
+  for (let i = 0; i < maxTotalFrames; i++) {
     if ((i + 1) % 20 === 0) {
       core.info(`Rendered ${i + 1} frames.`)
     }
 
-    Engine.update(engine, 1000 / 60)
-    ctx.fillStyle = 'white'
+    Engine.update(engine, 1000 / FRAME_RATE)
+
+    // reset the canvas
+    ctx.fillStyle = backgroundColor
     ctx.fillRect(0, 0, WIDTH, HEIGHT)
 
-    // @ts-ignore
+    // @ts-expect-error
     Render.bodies(render, Composite.allBodies(engine.world), ctx)
 
-    font.draw(
-      // @ts-ignore
-      ctx,
-      name,
-      WIDTH / 2 - (fontCenterX - shapeCenterX),
-      HEIGHT / 2 - (fontCenterY - shapeCenterY),
-      144
-    )
+    if (debug) {
+      useFont().draw(castCanvas(ctx), `frame: ${i + 1}`, 10, 10, 12)
 
-    gif.addFrame(ctx)
+      const [speed, angularSpeed] = maxWorldSpeed(engine.world)
+
+      useFont().draw(castCanvas(ctx), `speed: ${speed.toFixed(3)}`, 10, 30, 12)
+      useFont().draw(
+        castCanvas(ctx),
+        `angular speed: ${angularSpeed.toFixed(3)}`,
+        10,
+        50,
+        12
+      )
+
+      fs.writeFileSync(`tmp/debug-${i}.png`, img.toBuffer('image/png'))
+    }
+
+    await encoder.onFrame(ctx, i)
+
+    if (i > 30 && isWorldStopped(engine.world)) {
+      core.info(`World stopped at frame ${i + 1}. Stopping render.`)
+      break
+    }
   }
-
-  gif.finish()
 
   core.info('Render finished.')
-  core.info('Reducing output size...')
+  core.info('Compressing...')
 
-  const buffer = gif.out.getData()
+  // create the output folder
+  fs.mkdirSync(path.dirname(options.output), {recursive: true})
 
-  // create the folder
-  fs.mkdirSync(path.dirname(options.output), { recursive: true })
+  await encoder.finalize(options.output, options.type === 'both')
 
-  if (options.type === 'webp') {
-    await sharp(buffer, {
-      animated: true
-    })
-      .webp({
-        delay: Math.floor(1000 / 60),
-        loop: 1,
-        quality: 60,
-        nearLossless: true,
-        effort: 6,
-        // @ts-ignore
-        minSize: true,
-        alphaQuality: 0,
-        mixed: true
-      })
-      .toFile(options.output)
-  } else {
-    fs.writeFileSync(options.output, buffer)
-
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const gifsiclePath = await new Promise<string>(resolve => {
-      eval(`
-        import("gifsicle").then((gifsicle) => {
-          resolve(gifsicle.default);
-        });
-      `)
-    })
-    core.debug(`gifsicle path: ${gifsiclePath}`)
-
-    execFileSync(gifsiclePath, [
-      '--optimize=2',
-      '--colors',
-      '16',
-      '--no-loopcount',
-      '--batch',
-      options.output
-    ])
-  }
-
-  core.info('File written.')
+  core.info(`Compressed file ${options.output} written.`)
 }

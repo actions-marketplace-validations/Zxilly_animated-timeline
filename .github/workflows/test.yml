@@ -2,18 +2,23 @@ name: Test Action
 on:
   workflow_dispatch:
 
+permissions: read-all
+
 jobs:
   test:
+    strategy:
+      matrix:
+        type: [ webp, gif, both ]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ./
         with:
-          output: 'animation.webp'
-          type: 'webp'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/upload-artifact@v3
+          login: Zxilly
+          output: 'animation'
+          type: ${{ matrix.type }}
+      - uses: actions/upload-artifact@v5
         with:
-          name: animation
-          path: animation.webp
+          name: ${{ matrix.type }}
+          path: |
+            animation*
