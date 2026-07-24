@@ -11,13 +11,13 @@ jobs:
         type: [ webp, gif, both ]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./
         with:
           login: Zxilly
           output: 'animation'
           type: ${{ matrix.type }}
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.type }}
           path: |
